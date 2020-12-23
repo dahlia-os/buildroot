@@ -512,6 +512,7 @@ disk_percent="on"
 # guayadeque
 # io.elementary.music
 # iTunes
+# Music
 # juk
 # lollypop
 # MellowPlayer
@@ -749,7 +750,8 @@ disk_display="off"
 #
 # Default:  'ascii'
 # Values:   'ascii', 'caca', 'catimg', 'chafa', 'jp2a', 'iterm2', 'off',
-#           'pot', 'termpix', 'pixterm', 'tycat', 'w3m', 'kitty', 'ueberzug'
+#           'pot', 'termpix', 'pixterm', 'tycat', 'w3m', 'kitty', 'ueberzug',
+#           'viu'
 
 # Flag:     --backend
 image_backend="ascii"
@@ -1520,7 +1522,7 @@ get_packages() {
             has kiss       && tot kiss l
             has cpt-list   && tot cpt-list
             has pacman-key && tot pacman -Qq --color never
-            has dpkg       && tot dpkg-query -f '.\n' -W
+            has apt        && tot apt list
             has rpm        && tot rpm -qa
             has xbps-query && tot xbps-query -l
             has apk        && tot apk info
@@ -1533,7 +1535,11 @@ get_packages() {
             has sorcery    && tot gaze installed
             has alps       && tot alps showinstalled
             has butch      && tot butch list
-            has mine       && tot mine -q
+            has swupd      && tot swupd bundle-list --quiet
+
+            # 'mine' conflicts with minesweeper games.
+            [[ -f /etc/SDE-VERSION ]] &&
+                has mine && tot mine -q
 
             # Counting files/dirs.
             # Variables need to be unquoted here. Only Bedrock Linux is affected.
@@ -1563,9 +1569,13 @@ get_packages() {
             }
 
             has nix-store && {
-                manager=nix-system  && tot nix-store -q --requisites /run/current-system/sw
-                manager=nix-user    && tot nix-store -q --requisites ~/.nix-profile
-                manager=nix-default && tot nix-store -q --requisites /nix/var/nix/profiles/default
+                nix-user-pkgs() {
+                    nix-store -qR ~/.nix-profile
+                    nix-store -qR /etc/profiles/per-user/"$USER"
+                }
+                manager=nix-system  && tot nix-store -qR /run/current-system/sw
+                manager=nix-user    && tot nix-user-pkgs
+                manager=nix-default && tot nix-store -qR /nix/var/nix/profiles/default
             }
 
             # pkginfo is also the name of a python package manager which is painfully slow.
@@ -1604,8 +1614,12 @@ get_packages() {
             has pkgin && tot pkgin list
 
             has nix-store && {
-                manager=nix-system && tot nix-store -q --requisites "/run/current-system/sw"
-                manager=nix-user   && tot nix-store -q --requisites "$HOME/.nix-profile"
+                nix-user-pkgs() {
+                    nix-store -qR ~/.nix-profile
+                    nix-store -qR /etc/profiles/per-user/"$USER"
+                }
+                manager=nix-system && tot nix-store -qR /run/current-system/sw
+                manager=nix-user   && tot nix-store -qR nix-user-pkgs
             }
         ;;
 
@@ -2568,10 +2582,21 @@ get_memory() {
                     "MemFree" | "Buffers" | "Cached" | "SReclaimable")
                         mem_used="$((mem_used-=${b/kB}))"
                     ;;
+
+                    # Available since Linux 3.14rc (34e431b0ae398fc54ea69ff85ec700722c9da773).
+                    # If detected this will be used over the above calculation for mem_used.
+                    "MemAvailable")
+                        mem_avail=${b/kB}
+                    ;;
                 esac
             done < /proc/meminfo
 
-            mem_used="$((mem_used / 1024))"
+            if [[ $mem_avail ]]; then
+                mem_used=$(((mem_total - mem_avail) / 1024))
+            else
+                mem_used="$((mem_used / 1024))"
+            fi
+
             mem_total="$((mem_total / 1024))"
         ;;
 
@@ -2715,6 +2740,7 @@ get_song() {
         "guayadeque"
         "io.elementary.music"
         "iTunes"
+        "Music"
         "juk"
         "lollypop"
         "MellowPlayer"
@@ -2826,6 +2852,12 @@ get_song() {
 
         "itunes"*)
             song="$(osascript -e 'tell application "iTunes" to artist of current track as¬
+                                  string & "\n" & album of current track as¬
+                                  string & "\n" & name of current track as string')"
+        ;;
+
+        "music"*)
+            song="$(osascript -e 'tell application "Music" to artist of current track as¬
                                   string & "\n" & album of current track as¬
                                   string & "\n" & name of current track as string')"
         ;;
@@ -2979,9 +3011,9 @@ get_resolution() {
 
             elif [[ -d /sys/class/drm ]]; then
                 for dev in /sys/class/drm/*/modes; do
-                    read -r resolution _ < "$dev"
+                    read -r single_resolution _ < "$dev"
 
-                    [[ $resolution ]] && break
+                    [[ $single_resolution ]] && resolution="${single_resolution}, ${resolution}"
                 done
             fi
         ;;
@@ -3322,7 +3354,7 @@ END
             QT_BINDIR="$(qtpaths --binaries-dir)" && PATH+=":$QT_BINDIR"
 
             IFS=$'\n' read -d "" -ra konsole_instances \
-                <<< "$(qdbus | awk '/org.kde.konsole/ {print $1}')"
+                <<< "$(qdbus | awk '/org.kde.'"$term"'/ {print $1}')"
 
             for i in "${konsole_instances[@]}"; do
                 IFS=$'\n' read -d "" -ra konsole_sessions <<< "$(qdbus "$i" | grep -F '/Sessions/')"
@@ -3574,7 +3606,7 @@ get_disk() {
     for disk in "${disks[@]}"; do
         # Create a second array and make each element split at whitespace this time.
         IFS=" " read -ra disk_info <<< "$disk"
-        disk_perc=${disk_info[-2]/\%}
+        disk_perc=${disk_info[${#disk_info[@]} - 2]/\%}
 
         case $disk_percent in
             off) disk_perc=
@@ -3582,29 +3614,34 @@ get_disk() {
 
         case $df_version in
             *befhikm*)
-                disk="$((disk_info[-4]/1024/1024))G / $((disk_info[-5]/1024/1024))G"
-                disk+="${disk_perc:+ ($disk_perc%)}"
+                disk=$((disk_info[${#disk_info[@]} - 4] / 1024 / 1024))G
+                disk+=" / "
+                disk+=$((disk_info[${#disk_info[@]} - 5] / 1024/ 1024))G
+                disk+=${disk_perc:+ ($disk_perc%)}
             ;;
 
             *)
-                disk="${disk_info[-4]/i} / ${disk_info[-5]/i}${disk_perc:+ ($disk_perc%)}"
+                disk=${disk_info[${#disk_info[@]} - 4]/i}
+                disk+=" / "
+                disk+=${disk_info[${#disk_info[@]} - 5]/i}
+                disk+=${disk_perc:+ ($disk_perc%)}
             ;;
         esac
 
         case $disk_subtitle in
             name)
-                disk_sub=${disk_info[*]::${#disk_info[@]}-5}
+                disk_sub=${disk_info[*]::${#disk_info[@]} - 5}
             ;;
 
             dir)
-                disk_sub=${disk_info[-1]/*\/}
-                disk_sub=${disk_sub:-${disk_info[-1]}}
+                disk_sub=${disk_info[${#disk_info[@]} - 1]/*\/}
+                disk_sub=${disk_sub:-${disk_info[${#disk_info[@]} - 1]}}
             ;;
 
             none) ;;
 
             *)
-                disk_sub=${disk_info[-1]}
+                disk_sub=${disk_info[${#disk_info[@]} - 1]}
             ;;
         esac
 
@@ -3881,7 +3918,8 @@ image_backend() {
         "off") image_backend="off" ;;
 
         "caca" | "catimg" | "chafa" | "jp2a" | "iterm2" | "termpix" |\
-        "tycat" | "w3m" | "sixel" | "pixterm" | "kitty" | "pot", | "ueberzug")
+        "tycat" | "w3m" | "sixel" | "pixterm" | "kitty" | "pot", | "ueberzug" |\
+         "viu")
             get_image_source
 
             [[ ! -f "$image" ]] && {
@@ -3908,7 +3946,7 @@ image_backend() {
             err "Image: Unknown image backend specified '$image_backend'."
             err "Image: Valid backends are: 'ascii', 'caca', 'catimg', 'chafa', 'jp2a', 'iterm2',
                                             'kitty', 'off', 'sixel', 'pot', 'pixterm', 'termpix',
-                                            'tycat', 'w3m')"
+                                            'tycat', 'w3m', 'viu')"
             err "Image: Falling back to ascii mode."
             print_ascii
         ;;
@@ -4308,15 +4346,14 @@ display_image() {
             if [ "$wait" = true ];then
                 wait=false;
             else
-                source "$(ueberzug library)"
-                ImageLayer 0< <(
-                ImageLayer::add\
-                        ['identifier']="neofetch"\
-                        ['x']="$xoffset" ['y']="$yoffset"\
-                        ['max_width']="$((width / font_width))"\
-                        ['max_height']="$((height / font_height))"\
-                        ['path']="$image";
-                read -rs;
+                ueberzug layer --parser bash 0< <(
+                    declare -Ap ADD=(\
+                        [action]="add"\
+                        [identifier]="neofetch"\
+                        [x]=$xoffset [y]=$yoffset\
+                        [path]=$image\
+                    )
+                    read -rs
                 )
             fi
         ;;
@@ -4384,6 +4421,12 @@ display_image() {
         "tycat")
             tycat \
                 -g "${width}x${height}" \
+            "$image"
+        ;;
+
+        "viu")
+            viu \
+                -t -w "$((width / font_width))" -h "$((height / font_height))" \
             "$image"
         ;;
 
@@ -4755,6 +4798,10 @@ cache_uname() {
     kernel_machine="${uname[2]}"
 
     if [[ "$kernel_name" == "Darwin" ]]; then
+        # macOS can report incorrect versions unless this is 0.
+        # https://github.com/dylanaraps/neofetch/issues/1607
+        export SYSTEM_VERSION_COMPAT=0
+
         IFS=$'\n' read -d "" -ra sw_vers <<< "$(awk -F'<|>' '/key|string/ {print $3}' \
                             "/System/Library/CoreServices/SystemVersion.plist")"
         for ((i=0;i<${#sw_vers[@]};i+=2)) {
@@ -4962,7 +5009,7 @@ BARS:
 IMAGE BACKEND:
     --backend backend           Which image backend to use.
                                 Possible values: 'ascii', 'caca', 'catimg', 'chafa', 'jp2a',
-                                'iterm2', 'off', 'sixel', 'tycat', 'w3m', 'kitty'
+                                'iterm2', 'off', 'sixel', 'tycat', 'w3m', 'kitty', 'viu'
     --source source             Which image or ascii file to use.
                                 Possible values: 'auto', 'ascii', 'wallpaper', '/path/to/img',
                                 '/path/to/ascii', '/path/to/dir/', 'command output' [ascii]
@@ -4984,6 +5031,7 @@ IMAGE BACKEND:
     --tycat source              Shortcut to use 'tycat' backend.
     --w3m source                Shortcut to use 'w3m' backend.
     --ueberzug source           Shortcut to use 'ueberzug' backend
+    --viu source                Shortcut to use 'viu' backend
     --off                       Shortcut to use 'off' backend (Disable ascii art).
 
     NOTE: 'source; can be any of the following: 'auto', 'ascii', 'wallpaper', '/path/to/img',
@@ -5213,7 +5261,7 @@ get_args() {
             "--source") image_source="$2" ;;
             "--ascii" | "--caca" | "--catimg" | "--chafa" | "--jp2a" | "--iterm2" | "--off" |\
             "--pot" | "--pixterm" | "--sixel" | "--termpix" | "--tycat" | "--w3m" | "--kitty" |\
-            "--ueberzug")
+            "--ueberzug" | "--viu")
                 image_backend="${1/--}"
                 case $2 in
                     "-"* | "") ;;
@@ -7260,27 +7308,28 @@ EOF
         ;;
 
         "Garuda"*)
-            set_colors 7 7
+            set_colors 7 7 3 7 2 4
             read -rd '' ascii_data <<'EOF'
-${c1}                                        
-              .%;888:X8889888@8:        
-             x;XxXB%8b8:b8%b88xx8:      
-          .88Xx;;             8X8x:.    
-         .tt8xX                 x8x8;   
-       .t%xx8:                   Xxx.8: 
-      .@8x8;                      x8xx@;
-    ,tSXXX°       .bbbbbbbbbbbbbbbbb8x@.
-   .SXxx°        bBBBBBBBBBBBBBBBBB:S;8.
-  ,888S°                           ;8SS 
- .@8@%°                            ;8:  
- <8X88/                                 
-  x%888       .@88@8@X@X8X@@X@X@8@Xx    
-   .x8X@:   bb8x8x8b8b8x8s8x88b88x;     
-    .xxS88                  .@8@;:      
-      .x.88               .Xt@x;        
-       .::SSX88@8b8B8B8b@@8Sxx;         
-         .xq)9898999989989899°          
-                                        
+
+${c3}
+                     .%;888:8898898:
+                   x;XxXB%89b8:b8%b88:
+                .8Xxd                8X:.
+              .8Xx;                    8x:.
+            .tt8x          ${c6}.d${c3}            x88;
+         .@8x8;          ${c6}.db:${c3}              xx@;
+       ${c4},tSXX°          .bbbbbbbbbbbbbbbbbbbB8x@;
+     .SXxx            bBBBBBBBBBBBBBBBBBBBbSBX8;
+   ,888S                                     pd!
+  8X88/                                       q
+  GBB.
+   ${c5}x%88        d888@8@X@X@X88X@@XX@@X@8@X.
+     dxXd    dB8b8b8B8B08bB88b998888b88x.
+      dxx8o                      .@@;.
+        dx88                   .t@x.
+          d:SS@8ba89aa67a853Sxxad.
+            .d988999889889899dd.
+
 EOF
 
         ;;
@@ -8493,7 +8542,7 @@ EOF
 EOF
         ;;
 
-        "NixOS"*)
+        "nixos_old"*)
             set_colors 4 6
             read -rd '' ascii_data <<'EOF'
 ${c1}          ::::.    ${c2}':::::     ::::'
@@ -8515,6 +8564,32 @@ ${c1}            .:::::::: ${c2}'::::::::::
 ${c1}           .::::''::::.     ${c2}'::::.
 ${c1}          .::::'   ::::.     ${c2}'::::.
 ${c1}         .::::      ::::      ${c2}'::::.
+EOF
+        ;;
+
+        "NixOS"*)
+            set_colors 4 6
+            read -rd '' ascii_data <<'EOF'
+${c1}          ▗▄▄▄       ${c2}▗▄▄▄▄    ▄▄▄▖
+${c1}          ▜███▙       ${c2}▜███▙  ▟███▛
+${c1}           ▜███▙       ${c2}▜███▙▟███▛
+${c1}            ▜███▙       ${c2}▜██████▛
+${c1}     ▟█████████████████▙ ${c2}▜████▛     ${c1}▟▙
+${c1}    ▟███████████████████▙ ${c2}▜███▙    ${c1}▟██▙
+${c2}           ▄▄▄▄▖           ▜███▙  ${c1}▟███▛
+${c2}          ▟███▛             ▜██▛ ${c1}▟███▛
+${c2}         ▟███▛               ▜▛ ${c1}▟███▛
+${c2}▟███████████▛                  ${c1}▟██████████▙
+${c2}▜██████████▛                  ${c1}▟███████████▛
+${c2}      ▟███▛ ${c1}▟▙               ▟███▛
+${c2}     ▟███▛ ${c1}▟██▙             ▟███▛
+${c2}    ▟███▛  ${c1}▜███▙           ▝▀▀▀▀
+${c2}    ▜██▛    ${c1}▜███▙ ${c2}▜██████████████████▛
+${c2}     ▜▛     ${c1}▟████▙ ${c2}▜████████████████▛
+${c1}           ▟██████▙       ${c2}▜███▙
+${c1}          ▟███▛▜███▙       ${c2}▜███▙
+${c1}         ▟███▛  ▜███▙       ${c2}▜███▙
+${c1}         ▝▀▀▀    ▀▀▀▀▘       ${c2}▀▀▀▘
 EOF
         ;;
 
@@ -10501,31 +10576,18 @@ EOF
 
         ;;
 
-        "semc"*)
-            set_colors 2 8
+       	"semc"*)
+            set_colors 2 8 1
             read -rd '' ascii_data <<'EOF'
-${c1}              __.;=====;.__
-          _.=+==++=++=+=+===;.
-           -=+++=+===+=+=+++++=_
-      .     -=:``     `--==+=++==.
-     _vi,    `            --+=++++:
-    .uvnvi.       _._       -==+==+.
-   .vvnvnI`    .;==|==;.     :|=||=|.
-${c2}     _______._______.___  ___.  ______
-    /       |   ____|   \/   | /      |
-   |   (----|  |__  |  \  /  ||  ,----'
-    \   \   |   __| |  |\/|  ||  |
-.----)   |  |  |____|  |  |  ||  `----.
-|_______/   |_______|__|  |__| \______|
-
-${c1}   -1vvnvv.     `~+++`        ++|+++
-    +vnvnnv,                 `-|===
-     +vnvnvns.           .      :=-
-      -Invnvvnsi..___..=sv=.     `
-        +Invnvnvnnnnnnnnvvnn;.
-          ~|Invnvnvvnvvvnnv}+`
-             -~|{*l}*|~
-
+${c1}            /\
+     ______/  \
+    /      |()| ${c2}E M C
+${c1}   |   (-- |  |
+    \   \  |  |
+.----)   | |__|
+|_______/ / ${c3}"${c1}  \
+              ${c3}"
+            "
 EOF
 
         ;;
